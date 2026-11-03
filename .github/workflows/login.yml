@@ -1,0 +1,35 @@
+name: Daily Blitz Login
+
+on:
+  schedule:
+    # Runs daily at 00:00 UTC (03:30 Asia/Tehran)
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  auto-login:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install Playwright Chromium
+        run: |
+          playwright install --with-deps chromium
+
+      - name: Execute Automated Login
+        env:
+          EMAIL: ${{ secrets.EMAIL }}
+          PAS: ${{ secrets.PAS }}
+        run: |
+          python login.py

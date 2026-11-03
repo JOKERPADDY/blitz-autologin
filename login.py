@@ -5,6 +5,7 @@ from playwright.sync_api import sync_playwright
 def main():
     email = os.getenv("EMAIL")
     pas = os.getenv("PAS")
+    app_url = os.getenv("APP_URL", "https://movie-box.joke.blitz.cloud/")
 
     if not email or not pas:
         print("ERROR: EMAIL or PAS environment variables are missing.")
@@ -114,6 +115,16 @@ def main():
                 email_input_visible = page.is_visible('input[type="email"], input[name="email"]')
             except Exception:
                 pass
+
+            # Wake up the app container by opening the App URL in the authenticated browser session
+            if app_url:
+                print(f"Navigating to App URL to wake app container: {app_url}...")
+                try:
+                    page.goto(app_url, timeout=30000)
+                    page.wait_for_timeout(5000)
+                    print(f"App Page Title: '{page.title()}', Final URL: '{page.url}'")
+                except Exception as e:
+                    print(f"Warning: Exception while opening App URL: {e}")
 
             # Check for success conditions:
             # 1. URL changed away from /login to dashboard/apps/home

@@ -14,92 +14,135 @@ def main():
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+        # Use standard desktop Chrome user agent
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        page = context.new_page()
 
         try:
             print(f"Navigating to {login_url}...")
-            page.goto(login_url, timeout=30000)
+            page.goto(login_url, wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(3000)
 
-            # Check for CAPTCHA / 2FA on initial load
-            content = page.content().lower()
-            if any(term in content for term in ["captcha", "cf-turnstile", "g-recaptcha", "hcaptcha", "2fa", "two-factor"]):
-                print("LOGIN_UNCONFIRMED: CAPTCHA or 2FA prompt detected on load.")
+            print(f"Initial Page Title: '{page.title()}', URL: '{page.url}'")
+
+            # Check if active 2FA input box or active Cloudflare challenge iframe is visible on load
+            two_fa_visible = page.is_visible('input[name="code"], input[name="otp"], input[autocomplete="one-time-code"]')
+            captcha_iframe_visible = page.is_visible('iframe[src*="challenges.cloudflare.com"], iframe[src*="recaptcha"], iframe[src*="hcaptcha"]')
+
+            if two_fa_visible or captcha_iframe_visible:
+                print("LOGIN_UNCONFIRMED: Active CAPTCHA or 2FA prompt visible on load.")
                 browser.close()
                 sys.exit(2)
 
             # Fill email field
             filled_email = False
-            try:
-                page.get_by_label("Email address").fill(email)
-                filled_email = True
-            except Exception:
-                try:
-                    page.fill('input[type="email"], input[name="email"]', email)
+            for selector in ['input[type="email"]', 'input[name="email"]', 'input[id*="email"]', 'input[placeholder*="email" i]']:
+                if page.is_visible(selector):
+                    page.fill(selector, email)
                     filled_email = True
-                except Exception as e:
-                    print(f"LOGIN_FAILED: Could not fill email field. {e}")
-                    browser.close()
-                    sys.exit(1)
+                    break
+
+            if not filled_email:
+                try:
+                    page.get_by_label("Email address").fill(email)
+                    filled_email = True
+                except Exception:
+                    pass
+
+            if not filled_email:
+                print("LOGIN_FAILED: Could not locate visible email field.")
+                browser.close()
+                sys.exit(1)
 
             # Fill password field
-            try:
-                page.get_by_label("Password").fill(pas)
-            except Exception:
+            filled_pas = False
+            for selector in ['input[type="password"]', 'input[name="password"]', 'input[id*="password"]']:
+                if page.is_visible(selector):
+                    page.fill(selector, pas)
+                    filled_pas = True
+                    break
+
+            if not filled_pas:
                 try:
-                    page.fill('input[type="password"], input[name="password"]', pas)
-                except Exception as e:
-                    print(f"LOGIN_FAILED: Could not fill password field. {e}")
-                    browser.close()
-                    sys.exit(1)
+                    page.get_by_label("Password").fill(pas)
+                    filled_pas = True
+                except Exception:
+                    pass
+
+            if not filled_pas:
+                print("LOGIN_FAILED: Could not locate visible password field.")
+                browser.close()
+                sys.exit(1)
 
             # Click Sign in button
-            try:
-                page.get_by_role("button", name="Sign in").click()
-            except Exception:
+            clicked = False
+            for selector in ['button[type="submit"]', 'input[type="submit"]', 'button:has-text("Sign in")', 'button:has-text("Log in")']:
+                if page.is_visible(selector):
+                    page.click(selector)
+                    clicked = True
+                    break
+
+            if not clicked:
                 try:
-                    page.click('button[type="submit"], input[type="submit"], button:has-text("Sign in")')
-                except Exception as e:
-                    print(f"LOGIN_FAILED: Could not click Sign in button. {e}")
-                    browser.close()
-                    sys.exit(1)
+                    page.get_by_role("button", name="Sign in").click()
+                    clicked = True
+                except Exception:
+                    pass
+
+            if not clicked:
+                print("LOGIN_FAILED: Could not locate visible Sign in button.")
+                browser.close()
+                sys.exit(1)
 
             # Wait for navigation/response
-            page.wait_for_timeout(5000)
+            page.wait_for_timeout(6000)
             current_url = page.url
-            content_after = page.content().lower()
+            page_title = page.title()
+            print(f"Post-submit Page Title: '{page_title}', URL: '{current_url}'")
 
-            # Check for CAPTCHA, 2FA, or security prompt after submission
-            if any(term in content_after for term in ["captcha", "cf-turnstile", "g-recaptcha", "hcaptcha", "2fa", "verification code", "two-factor"]):
-                print("LOGIN_UNCONFIRMED: CAPTCHA, 2FA, or verification prompt detected after submit.")
+            # Check if 2FA code prompt appeared after submission
+            if page.is_visible('input[name="code"], input[name="otp"], input[autocomplete="one-time-code"]'):
+                print("LOGIN_UNCONFIRMED: 2FA prompt detected after submission.")
                 browser.close()
                 sys.exit(2)
 
-            # Check if login form is gone and URL is on blitz.cloud domain
+            # Check if email input is still visible
             email_input_visible = False
             try:
                 email_input_visible = page.is_visible('input[type="email"], input[name="email"]')
             except Exception:
                 pass
 
-            if not email_input_visible and "blitz.cloud" in current_url and "/login" not in current_url:
+            # Check for success conditions:
+            # 1. URL changed away from /login to dashboard/apps/home
+            # 2. Or login form is no longer visible on blitz.cloud
+            if "blitz.cloud" in current_url and "/login" not in current_url and not email_input_visible:
                 print("LOGIN_CONFIRMED")
                 browser.close()
                 sys.exit(0)
 
-            # Check for explicit login error
-            if any(term in content_after for term in ["invalid", "incorrect credentials", "wrong password"]) or email_input_visible:
-                print("LOGIN_FAILED: Form still visible or login error detected.")
+            # Check for error text displayed on the login page
+            visible_text = page.inner_text("body").lower() if page.is_visible("body") else ""
+            if any(err in visible_text for err in ["invalid email or password", "incorrect credentials", "wrong password", "invalid credentials"]):
+                print("LOGIN_FAILED: Invalid credentials error displayed on page.")
                 browser.close()
                 sys.exit(1)
 
-            if "blitz.cloud" in current_url:
+            if not email_input_visible and "blitz.cloud" in current_url:
                 print("LOGIN_CONFIRMED")
                 browser.close()
                 sys.exit(0)
-            else:
-                print("LOGIN_UNCONFIRMED: Unexpected domain or navigation outcome.")
+
+            if email_input_visible:
+                print("LOGIN_FAILED: Login form still visible after submit.")
                 browser.close()
-                sys.exit(2)
+                sys.exit(1)
+
+            print("LOGIN_UNCONFIRMED: Unexpected page state or domain.")
+            browser.close()
+            sys.exit(2)
 
         except Exception as e:
             print(f"LOGIN_FAILED: Exception occurred during login flow. {e}")
